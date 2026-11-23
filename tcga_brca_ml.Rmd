@@ -1,0 +1,1862 @@
+---
+title: "RBIF 112 Final Project"
+author: "Maurice C. Slaughter"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  chunk_output_type: console
+---
+ 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.path = "HW5_figures/"
+)
+```
+# Data Preparation
+Here the data is loaded from the saved TCGA-BRCA data. We identified the primary tumor and normal samples. Following this, the protein-coding genes were selected.
+
+```{r tcga_data_acquisition, message=FALSE, warning=FALSE}
+
+#################################################################################
+#### Cancer data set ############################################################
+#################################################################################
+
+#######################
+#### Load packages ####
+#######################
+# BiocManager::install("TCGAbiolinks")
+# BiocManager::install("EDASeq") # required for sample normalization
+library(TCGAbiolinks); library(EDASeq)
+
+
+##########################################
+#### Load saved TCGA-BRCA data ####
+##########################################
+data <- readRDS("TCGA_BRCA_SummarizedExperiment.rds")
+dataPrimary_Target <- colnames(data)[data$shortLetterCode == "TP"]
+dataNormal_Target  <- colnames(data)[data$shortLetterCode == "NT"]
+
+dim(data)
+length(dataPrimary_Target)
+length(dataNormal_Target)
+ 
+
+############################################
+#### Subset summarizedExperiment object ####
+############################################
+SECoding <- data[rowData(data)$gene_type == "protein_coding", ]
+
+#############################################################################################################
+#### The following function will return the data from specified slots in the summarizedExperiment object ####
+#############################################################################################################
+dataPrep_Coding <- TCGAanalyze_Preprocessing(object = SECoding, cor.cut = 0.6,  datatype = "unstranded")                      
+
+########################################
+#### quantile normalize the samples ####
+########################################
+dataNorm_Coding <- TCGAanalyze_Normalization(
+  tabDF = dataPrep_Coding,
+  geneInfo = geneInfoHT,
+  method = "geneLength"
+)
+
+
+########################
+#### Filter samples ####
+########################
+dataFilt_Coding <- TCGAanalyze_Filtering(tabDF = dataNorm_Coding, method = "quantile", qnt.cut =  0.25)   
+
+ 
+```
+## Normalization Comparison
+Expression distributions were compared before and after normalization to assess whether preprocessing reduced sample-level technical variability.
+
+
+```{r q1_normalization_comparison, fig.width=12, fig.height=6}
+
+old_par <- par(
+  mfrow = c(1, 2),
+  mar = c(4, 4, 4, 2)
+)
+
+
+boxplot(
+  log2(dataPrep_Coding + 1),
+  outline = FALSE,
+ col = "lightskyblue",
+border = "grey65",
+medcol = "navy",
+  names = FALSE,
+  main = "Expression Before Normalization",
+  xlab = "TCGA-BRCA Samples",
+  ylab = "log2(expression + 1)",
+  ylim = c(0, 24),
+)
+
+boxplot(
+  log2(dataNorm_Coding + 1),
+  outline = FALSE,
+  col = "lightskyblue",
+border = "grey65",
+medcol = "navy",
+  names = FALSE,
+  main = "Expression After Normalization",
+  xlab = "TCGA-BRCA Samples",
+  ylab = "log2(expression + 1)",
+  ylim = c(0, 24),
+)
+par(old_par)
+
+
+```
+The overall distributions appear similar before and after normalization with no large visual shift. We cannot claim that technical effects were removed based solely on this.
+
+
+
+## Initial Data Inspection
+
+Firstly, we checked the dataset dimensions, Tumor and Normal counts along with gene annotations and missing values. These checks help identify potential errors in the downstream analysis. Also we want to make sure we have an idea of what we have in counts to assess group balance and available statistical power. We want to make sure in the annotations that we match gene IDs to gene symbols consistently.
+```{r week1_data_inspection}
+library(SummarizedExperiment)
+library(matrixStats)
+
+# Inspect available expression assays
+assayNames(data)
+
+# Extract raw, unstranded STAR counts for protein-coding genes
+coding_counts <- assay(
+  SECoding,
+  "unstranded"
+)
+
+# Extract matching sample and gene information
+sample_info <- as.data.frame(
+  colData(SECoding)
+)
+
+gene_info <- as.data.frame(
+  rowData(SECoding)
+)
+
+# Verify alignment
+stopifnot(
+  identical(
+    colnames(coding_counts),
+    rownames(sample_info)
+  ),
+  identical(
+    rownames(coding_counts),
+    rownames(gene_info)
+  )
+)
+
+# Create the analysis-group variable
+sample_info$Group <- factor(
+  sample_info$sample_type,
+  levels = c(
+    "Solid Tissue Normal",
+    "Primary Tumor"
+  ),
+  labels = c(
+    "Normal",
+    "Tumor"
+  )
+)
+# Log2-transform raw counts for visualization (+1 avoids log2(0))
+log_counts <- log2(coding_counts + 1)
+
+# Inspect the data dimensions and sample balance
+dim(coding_counts)
+table(sample_info$Group)
+
+head(
+  sample_info[
+    ,
+    c(
+      "barcode",
+      "sample_type",
+      "preservation_method",
+      "Group"
+    )
+  ]
+)
+
+head(
+  gene_info[
+    ,
+    c(
+      "gene_name",
+      "gene_type"
+    )
+  ]
+)
+
+# Build the tables
+column_stats <- data.frame(
+  Library_Size = colSums(coding_counts)
+)
+
+row_stats <- data.frame(
+  Mean = rowMeans(log_counts),
+  SD   = rowSds(log_counts)
+)
+
+# Check for missing expression measurements
+sum(is.na(coding_counts))
+```
+
+```{r week1_expression_distributions, fig.width=12, fig.height=6}
+group_colors <- ifelse(
+  sample_info$Group == "Tumor",
+  "tomato",
+  "steelblue"
+)
+
+boxplot(
+  log_counts,
+  outline = FALSE,
+  names = FALSE,
+  col = group_colors,
+  main = "Raw Log2 Expression Distributions",
+  xlab = "TCGA-BRCA Samples",
+  ylab = "log2(raw count + 1)"
+)
+
+legend(
+  "topright",
+  legend = c("Normal","Tumor"),
+  fill = c("steelblue", "tomato"),
+  bty = "n"
+)
+```
+Most samples have broad but similar expression distributions while a few appear shifted. The groups are not clearly separated and the Normal and Tumor distributions overlap substantially.
+```{r week1_library_sizes, fig.width=12, fig.height=6}
+barplot(
+  column_stats$Library_Size / 1e6,
+  names.arg = FALSE,
+  col = group_colors,
+  border = NA,
+  main = "Protein-Coding Library Sizes by Sample",
+  xlab = "TCGA-BRCA Samples",
+  ylab = "Protein-coding reads (millions)"
+)
+
+legend(
+  "topright",
+  legend = c("Normal", "Tumor"),
+  fill = c("steelblue", "tomato"),
+  bty = "n"
+)
+```
+We have in our visualization the comparison of library sizes. The library sizes across tumor and normal samples are mostly consistent with each other while there are a few that have noticeably more reads. Differences in read depth can affect raw expression counts. 
+```{r week1_mean_sd, fig.width=8, fig.height=6}
+plot(
+  row_stats$Mean,
+  row_stats$SD,
+  pch = 16,
+  cex = 0.35,
+  col = rgb(
+    0.15,
+    0.35,
+    0.65,
+    0.35
+  ),
+  xlab = "Mean log2 expression",
+  ylab = "Standard deviation",
+  main = "Gene-Level Mean and Variability"
+)
+```
+In the Variability vs Gene-Level Mean we see that variability rises from low expression and spreads widely at intermediate expression, generally decreasing at higher expression. We also can see that a dense group of highly expressed genes has relatively low variability. 
+
+## Gene Selection for PCA
+Here we log2-transform the filtered, normalized expression data and then calculate each gene’s variance across samples. Then it selects the 100 and 1,000 most variable genes for PCA. We confirm the resulting matrix sizes with dimension checks. Variable genes help reveal the differences among samples even though high variance alone doesn't establish biological importance or predictive value.
+```{r q1, fig.width=14, fig.height=7}
+################################################################################
+################################################################################
+#### Part 1 PCA ################################################################
+################################################################################
+################################################################################
+
+#### Select probes by variance ####
+ge = log2(dataFilt_Coding + 1)
+gene_variance <- apply(
+  ge,
+  1,
+  var
+)
+
+variance_order <- order(
+  gene_variance,
+  decreasing = TRUE
+)
+
+ top100 <- ge[
+  variance_order[1:100],
+]
+
+  top1000 <- ge[
+  variance_order[1:1000],
+]
+
+ 
+dim(top100)
+dim(top1000)
+```
+
+```{r gene_age_correlations}
+# One tumor sample per patient, with age available
+keep_age <- sample_info$Group == "Tumor" &
+  !is.na(sample_info$age_at_diagnosis)
+
+age_info <- sample_info[keep_age, , drop = FALSE]
+age_info <- age_info[!duplicated(age_info$patient), , drop = FALSE]
+
+age_years <- age_info$age_at_diagnosis / 365.25
+age_ge <- ge[, rownames(age_info), drop = FALSE]
+
+# Spearman correlations for each gene
+age_results <- t(apply(age_ge, 1, function(values) {
+  if (sd(values) == 0) {
+    return(c(rho = NA_real_, p_value = NA_real_))
+  }
+
+  result <- cor.test(
+    values, age_years,
+    method = "spearman",
+    exact = FALSE
+  )
+
+  c(rho = unname(result$estimate), p_value = result$p.value)
+}))
+
+age_results <- data.frame(
+  ID = rownames(age_results),
+  age_results,
+  row.names = NULL
+)
+
+age_results$padj <- p.adjust(age_results$p_value, method = "BH")
+
+gene_match <- match(
+  sub("\\..*$", "", age_results$ID),
+  sub("\\..*$", "", gene_info$gene_id)
+)
+age_results$Gene <- gene_info$gene_name[gene_match]
+
+nrow(age_info)
+
+age_results |>
+  dplyr::select(ID, Gene, rho, p_value, padj) |>
+  dplyr::arrange(padj, p_value) |>
+  head(10)
+
+sum(age_results$padj < 0.05, na.rm = TRUE)
+```
+The Spearman correlations were calculated between each gene's expression and age in years. Benjamini–Hochberg correction was applied to account for testing many genes, and gene symbols were added for readability.  There were 104 patients with no significant genes after correction in the Age analysis. CDO1 had the strongest listed association but did not remain significant. There is one tumor sample per patient with age available.
+
+```{r gene_time_correlations}
+# One tumor sample per patient
+tumor_info <- sample_info[
+  sample_info$Group == "Tumor", , drop = FALSE
+]
+tumor_info <- tumor_info[
+  !duplicated(tumor_info$patient), , drop = FALSE
+]
+
+time_variables <- c(
+  "days_to_death",
+  "days_to_last_follow_up"
+)
+
+time_results <- list()
+
+for (variable in time_variables) {
+  info <- tumor_info[
+    !is.na(tumor_info[[variable]]), , drop = FALSE
+  ]
+
+  values <- info[[variable]]
+  expression <- ge[, rownames(info), drop = FALSE]
+
+  results <- t(apply(expression, 1, function(gene) {
+    if (length(values) < 3 ||
+        sd(values) == 0 ||
+        sd(gene) == 0) {
+      return(c(rho = NA_real_, p_value = NA_real_))
+    }
+
+    test <- cor.test(
+      gene, values,
+      method = "spearman",
+      exact = FALSE
+    )
+
+    c(rho = unname(test$estimate), p_value = test$p.value)
+  }))
+
+  results <- data.frame(
+    ID = rownames(results),
+    results,
+    row.names = NULL
+  )
+
+  results$padj <- p.adjust(results$p_value, method = "BH")
+
+  gene_match <- match(
+    sub("\\..*$", "", results$ID),
+    sub("\\..*$", "", gene_info$gene_id)
+  )
+  results$Gene <- gene_info$gene_name[gene_match]
+
+  time_results[[variable]] <- results
+
+  cat("\nVariable:", variable,
+      "\nPatients:", nrow(info), "\n")
+
+  print(
+    results |>
+      dplyr::select(ID, Gene, rho, p_value, padj) |>
+      dplyr::arrange(padj, p_value) |>
+      head(10)
+  )
+
+  cat("BH-significant genes:",
+      sum(results$padj < 0.05, na.rm = TRUE), "\n")
+}
+```
+
+The days-to-death analysis included only 11 patients and identified 134 BH-significant genes; this finding requires caution because of the small sample. The Last follow-up group has 111 patients with no BH-significant genes. In our time analysis, these correlations do not account for censoring and therefore aren't survival analyses.
+
+## Most and Least Variable Genes
+
+
+```{r gene_variance}
+library(dplyr)
+
+sample_cols <- colnames(ge)
+
+expression_df <- as.data.frame(ge) |>
+  tibble::rownames_to_column("ID")
+
+row_stats <- expression_df |>
+  rowwise() |>
+  mutate(
+    row_mean = mean(c_across(all_of(sample_cols)), na.rm = TRUE),
+    row_sd = sd(c_across(all_of(sample_cols)), na.rm = TRUE),
+    row_variance = var(c_across(all_of(sample_cols)), na.rm = TRUE)
+  ) |>
+  ungroup()
+# Match gene IDs, removing any version suffix
+gene_match <- match(
+  sub("\\..*$", "", row_stats$ID),
+  sub("\\..*$", "", gene_info$gene_id)
+)
+
+row_stats$Gene <- gene_info$gene_name[gene_match]
+# Ten genes with the highest variance
+row_stats |>
+  select(ID, Gene, row_mean, row_sd, row_variance) |>
+  arrange(desc(row_variance)) |>
+  head(10)
+
+# Ten genes with the lowest variance
+row_stats |>
+  select(ID, Gene, row_mean, row_sd, row_variance) |>
+  arrange(row_variance) |>
+  head(10)
+```
+
+
+This block calculates each gene's mean, standard deviation and variance. GSTM1 had the highest variance(~25.7), while DCTN2 had the lowest(~0.189). The variable genes can help reveal sample differences, but variance alone doesn't show whether a gene distinguishes Tumor from Normal.
+
+
+```{r gene_gene_correlations}
+gene_cor <- cor(t(top100), method = "spearman")
+
+# Display a small corner of the matrix
+round(gene_cor[1:5, 1:5], 3)
+
+# One sample per patient for significance tests
+unique_samples <- rownames(sample_info)[
+  !duplicated(sample_info$patient)
+]
+
+pair_expression <- top100[, unique_samples, drop = FALSE]
+gene_pairs <- combn(rownames(pair_expression), 2)
+
+pair_results <- lapply(seq_len(ncol(gene_pairs)), function(i) {
+  id1 <- gene_pairs[1, i]
+  id2 <- gene_pairs[2, i]
+
+  test <- cor.test(
+    pair_expression[id1, ],
+    pair_expression[id2, ],
+    method = "spearman",
+    exact = FALSE
+  )
+
+  data.frame(
+    ID1 = id1,
+    ID2 = id2,
+    rho = unname(test$estimate),
+    p_value = test$p.value
+  )
+})
+
+pair_results <- do.call(rbind, pair_results)
+pair_results$padj <- p.adjust(pair_results$p_value, method = "BH")
+
+annotation_ids <- sub("\\..*$", "", gene_info$gene_id)
+
+pair_results$Gene1 <- gene_info$gene_name[
+  match(sub("\\..*$", "", pair_results$ID1), annotation_ids)
+]
+pair_results$Gene2 <- gene_info$gene_name[
+  match(sub("\\..*$", "", pair_results$ID2), annotation_ids)
+]
+
+pair_results |>
+  dplyr::select(Gene1, Gene2, rho, p_value, padj) |>
+  dplyr::arrange(dplyr::desc(abs(rho))) |>
+  head(10)
+
+sum(pair_results$padj < 0.05, na.rm = TRUE)
+```
+
+The Spearman correlations measure how gene expression patterns vary together. The BH correction accounts for testing many gene pairs. The strongest listed correlation was between TRARG1 and CIDEC with ρ ≈ 0.986. The adjusted significance threshold was met by 4,068 pairs. We have to remember that strong correlation does not establish causation or direct regulation.
+
+```{r metadata_correlations}
+metadata <- data.frame(
+  age_years = tumor_info$age_at_diagnosis / 365.25,
+  days_to_death = tumor_info$days_to_death,
+  follow_up_days = tumor_info$days_to_last_follow_up
+)
+
+metadata_pairs <- combn(names(metadata), 2)
+
+metadata_results <- lapply(
+  seq_len(ncol(metadata_pairs)),
+  function(i) {
+    variable1 <- metadata_pairs[1, i]
+    variable2 <- metadata_pairs[2, i]
+
+    complete <- complete.cases(
+      metadata[, c(variable1, variable2)]
+    )
+
+    test <- cor.test(
+      metadata[[variable1]][complete],
+      metadata[[variable2]][complete],
+      method = "spearman",
+      exact = FALSE
+    )
+
+    data.frame(
+      Variable1 = variable1,
+      Variable2 = variable2,
+      Patients = sum(complete),
+      rho = unname(test$estimate),
+      p_value = test$p.value
+    )
+  }
+)
+
+metadata_results <- do.call(rbind, metadata_results)
+metadata_results$padj <- p.adjust(
+  metadata_results$p_value,
+  method = "BH"
+)
+
+metadata_results
+```
+
+This compares age, days to death and days to last follow-up using Spearman correlations and BH corrections. Age had no significant association with either time variable after correction. Days to death and last follow-up were perfectly correlated among 11 patients. This does not establish an independent biological relationship.
+
+```{r pca_analysis}
+#### PCA using top expression values ####
+
+pca_top100 <- prcomp(
+  t(top100),
+  center = TRUE,
+  scale. = TRUE
+)
+
+pca_top1000 <- prcomp(
+  t(top1000),
+  center = TRUE,
+  scale. = TRUE
+)
+
+
+#### Calculate variance explained by PCA ####
+
+summarize_pca_variance <- function(pca_object) {
+  
+  variance <- pca_object$sdev^2
+  
+  proportion <- variance / sum(variance)
+  
+  cumulative <- cumsum(proportion)
+  
+  data.frame(
+    PC = seq_along(proportion),
+    Proportion = proportion,
+    Cumulative = cumulative
+  )
+}
+
+variance_top100 <- summarize_pca_variance(
+  pca_top100
+)
+
+variance_top1000 <- summarize_pca_variance(
+  pca_top1000
+)
+
+#### Number of PCs required for 50% and 75% ####
+
+pc_thresholds <- data.frame(
+  Gene_Set = c("Top 100", "Top 1000"),
+  
+  PCs_for_50_percent = c(
+    which(variance_top100$Cumulative >= 0.50)[1],
+    which(variance_top1000$Cumulative >= 0.50)[1]
+  ),
+  
+  PCs_for_75_percent = c(
+    which(variance_top100$Cumulative >= 0.75)[1],
+    which(variance_top1000$Cumulative >= 0.75)[1]
+  )
+)
+
+pc_thresholds
+
+head(variance_top100, 10)
+head(variance_top1000, 10)
+ 
+
+#### Plot PCA results ####
+library(scatterplot3d)
+
+# Arrange metadata in the same order as the PCA samples
+pca_sample_info <- sample_info[
+  rownames(pca_top100$x),
+  ,
+  drop = FALSE
+]
+
+stopifnot(
+  identical(
+    rownames(pca_top100$x),
+    rownames(pca_sample_info)
+  )
+)
+
+# Colors identify phenotype
+phenotype_colors <- c(
+  Tumor = "#D55E00",
+  Normal = "#0072B2"
+)
+
+point_colors <- phenotype_colors[
+  as.character(pca_sample_info$Group)
+]
+
+# Shapes identify tissue preservation method
+preservation_shapes <- c(
+  FFPE    = 17,   # filled triangle, so the single FFPE sample stands out
+  OCT     = 16,   # filled circle
+  Unknown = 1     # open circle
+)
+
+point_shapes <- preservation_shapes[
+  as.character(pca_sample_info$preservation_method)
+]
+
+# Function for calculating the percentage explained by each PC
+pc_percent <- function(pca_object) {
+  100 * pca_object$sdev^2 /
+    sum(pca_object$sdev^2)
+}
+
+percent_top100 <- pc_percent(pca_top100)
+percent_top1000 <- pc_percent(pca_top1000)
+
+
+
+scatterplot3d(
+  pca_top100$x[, 1],
+  pca_top100$x[, 2],
+  pca_top100$x[, 3],
+  color = point_colors,
+  pch = point_shapes,
+  cex.symbols = 1.3,
+  angle = 55,
+  main = "PCA: Top 100 Variable Genes",
+  xlab = paste0("PC1 (", round(percent_top100[1], 1), "%)"),
+  ylab = paste0("PC2 (", round(percent_top100[2], 1), "%)"),
+  zlab = paste0("PC3 (", round(percent_top100[3], 1), "%)")
+)
+
+legend(
+  "topright",
+  legend = names(phenotype_colors),
+  col = phenotype_colors,
+  pch = 16,
+  title = "Phenotype",
+  bty = "n",
+  cex = 0.8
+)
+
+scatterplot3d(
+  pca_top1000$x[, 1],
+  pca_top1000$x[, 2],
+  pca_top1000$x[, 3],
+  color = point_colors,
+  pch = point_shapes,
+  cex.symbols = 1.3,
+  angle = 55,
+  main = "PCA: Top 1000 Variable Genes",
+  xlab = paste0("PC1 (", round(percent_top1000[1], 1), "%)"),
+  ylab = paste0("PC2 (", round(percent_top1000[2], 1), "%)"),
+  zlab = paste0("PC3 (", round(percent_top1000[3], 1), "%)")
+)
+
+legend(
+  "topright",
+  legend = names(phenotype_colors),
+  col = phenotype_colors,
+  pch = 16,
+  title = "Phenotype",
+  bty = "n",
+  cex = 0.8
+)
+
+legend(
+  "topleft",
+  legend =  
+    names(preservation_shapes),
+  
+  pch = preservation_shapes,
+  col = "black",
+  title = "Preservation",
+  bty = "n",
+  cex = 0.8
+)
+
+
+old_par <- par(
+  mfrow = c(1, 2),
+  las = 2,
+  cex.axis = 0.8
+)
+
+plot(
+  pca_top100,
+  type = "barplot",
+  main = "Scree Plot: Top 100 Genes"
+)
+
+plot(
+  pca_top1000,
+  type = "barplot",
+  main = "Scree Plot: Top 1,000 Genes"
+)
+
+par(old_par)
+ 
+
+```
+
+Here PCA summarizes expression patterns using the top 100 and 1,000 variable genes. The first two PCs explain 57.8% and 48.4% of the variance, respectively. These plots explore sample structure but do not establish predictive performance.
+```{r q1_feature_selection}
+################################################################################
+################################################################################
+#### Part 2 Logistic Regression ################################################
+################################################################################
+################################################################################
+
+
+e.m = as.numeric(sample_info$Group == "Tumor")
+sample.sel = rownames(sample_info) %in% colnames(ge)
+sum(sample.sel) 
+ge = ge[, rownames(sample_info)[sample.sel]]
+e.m = e.m[sample.sel]
+sum(e.m) 
+stopifnot(identical(colnames(ge), rownames(sample_info)[sample.sel]))
+
+e.m=factor(e.m,levels=c(0,1))
+tt.pvals=apply(ge,1,function(x) t.test( x ~ e.m )$p.value )
+hist(tt.pvals,col="lightgreen",breaks=50)
+sort(tt.pvals)[1:5]
+
+
+```
+Feature selection uses two-sample t-tests to rank genes by differences between Tumor and Normal expression. Small p-values indicate evidence of a group difference, but they do not establish predictive performance by themselves.
+```{r exploratory_heatmap, fig.width=12, fig.height=8}
+# Select the 20 genes with the smallest exploratory t-test p-values
+heat_genes <- names(sort(tt.pvals))[1:20]
+heat_data <- as.matrix(ge[heat_genes, , drop = FALSE])
+
+# Match gene symbols
+gene_labels <- gene_info$gene_name[
+  match(
+    sub("\\..*$", "", heat_genes),
+    sub("\\..*$", "", gene_info$gene_id)
+  )
+]
+missing_labels <- is.na(gene_labels) | gene_labels == ""
+gene_labels[missing_labels] <- heat_genes[missing_labels]
+
+# Standardize each gene across samples
+heat_z <- t(scale(t(heat_data)))
+
+sample_colors <- ifelse(e.m == "1", "tomato", "steelblue")
+
+heatmap(
+  heat_z,
+  scale = "none",
+  col = colorRampPalette(c("steelblue", "white", "tomato"))(101),
+  ColSideColors = sample_colors,
+  labRow = make.unique(gene_labels),
+  labCol = NA,
+  margins = c(5, 10),
+  cexRow = 0.8,
+  main = "Top 20 Genes: Exploratory Expression Heatmap"
+)
+
+legend(
+  "topright",
+  legend = c("Normal", "Tumor"),
+  fill = c("steelblue", "tomato"),
+  bty = "n",
+  cex = 0.7
+)
+```
+Here the exploratory heatmap displays the top 20 genes ranked by t-test p-value with expression standardized within each gene. Clustering shows mostly Tumor/Normal grouping with some mixing. This is an exploratory figure. It is not independent validation.
+
+```{r q1_train_test_split}
+set.seed(123)
+
+# Align metadata with expression columns
+model_info <- sample_info[colnames(ge), , drop = FALSE]
+
+# Assign 80% of patients to training
+patients <- unique(model_info$patient)
+training_patients <- sample(
+  patients,
+  size = round(0.8 * length(patients))
+)
+
+train_idx <- which(model_info$patient %in% training_patients)
+test_idx <- which(!model_info$patient %in% training_patients)
+
+outcome <- factor(
+  as.numeric(model_info$Group == "Tumor"),
+  levels = c(0, 1)
+)
+
+# Rank genes using training samples only
+training_pvals <- apply(ge[, train_idx, drop = FALSE], 1,
+  function(values) {
+    t.test(values ~ outcome[train_idx])$p.value
+  }
+)
+
+top_genes <- names(sort(training_pvals))[1:2]
+
+reg_df <- data.frame(
+  e.m = outcome,
+  gene1 = ge[top_genes[1], ],
+  gene2 = ge[top_genes[2], ],
+  row.names = colnames(ge)
+)
+
+train <- reg_df[train_idx, , drop = FALSE]
+test <- reg_df[test_idx, , drop = FALSE]
+
+gene_key <- data.frame(
+  Model_Variable = c("gene1", "gene2"),
+  Gene_ID = top_genes
+)
+
+gene_key$Symbol <- gene_info$gene_name[
+  match(
+    sub("\\..*$", "", top_genes),
+    sub("\\..*$", "", gene_info$gene_id)
+  )
+]
+
+gene_key
+table(train$e.m)
+table(test$e.m)
+
+# Verify no patient appears in both sets
+stopifnot(
+  length(intersect(
+    model_info$patient[train_idx],
+    model_info$patient[test_idx]
+  )) == 0
+)
+assess.prediction=function(truth,predicted) {
+# check for missing values (we are going to compute metrics
+# on non-missing values of course)
+predicted = predicted[ ! is.na(truth) ]
+truth = truth[ ! is.na(truth) ]
+truth = truth[ ! is.na(predicted) ]
+predicted = predicted[ ! is.na(predicted) ]
+cat("Total cases that are not NA: ",length(truth),"\n",sep="")
+# overall accuracy of the test: how many cases (both positive and
+# negative) we got right:
+cat("Correct predictions (accuracy): ",sum(truth==predicted), "(",signif(sum(truth==predicted)*100/length(truth),3),"%)\n",sep="")
+# how predictions align against known training/testing outcomes:
+# TP/FP= true/false positives, TN/FN=true/false negatives:
+TP = sum(truth==1 & predicted==1)
+TN = sum(truth==0 & predicted==0)
+FP = sum(truth==0 & predicted==1)
+FN = sum(truth==1 & predicted==0)
+P = TP+FN # total number of positives in the truth data
+N = FP+TN # total number of negatives
+cat("TPR (sensitivity)=TP/P: ", signif(100*TP/P,3),"%\n",sep="")
+cat("TNR (specificity)=TN/N: ", signif(100*TN/N,3),"%\n",sep="")
+cat("PPV (precision)=TP/(TP+FP): ", signif(100*TP/(TP+FP),3),"%\n",sep="")
+cat("FDR (false discovery)=1-PPV: ", signif(100*FP/(TP+FP),3),"%\n",sep="")
+cat("FPR =FP/N=1-TNR: ", signif(100*FP/N,3),"%\n",sep="")
+}
+ 
+# Model 1: top gene only
+M1 <- glm(e.m ~ gene1, data = train, family = "binomial")
+
+# Model 2: top two genes
+M2 <- glm(
+  e.m ~ gene1 + gene2,
+  data = train,
+  family = "binomial",
+  control = glm.control(maxit = 100)
+)
+pred1 <- predict(M1, newdata = test, type = "response")
+class1 <- as.numeric(pred1 > 0.5)
+
+pred2 <- predict(M2, newdata = test, type = "response" )
+class2 <- as.numeric(pred2 > 0.5)
+
+summary(M1)
+summary(M2)
+
+assess.prediction(test$e.m, class1)
+assess.prediction(test$e.m, class2)
+
+anova(M1, M2, test = "Chisq")
+
+rownames(test)[class1 != test$e.m]
+cor.test(reg_df$gene1, reg_df$gene2)
+
+"TCGA-A7-A0DC-01B-04R-A22O-07" %in% rownames(train)
+
+cor(reg_df$gene1[reg_df$e.m == "1"], reg_df$gene2[reg_df$e.m == "1"])
+cor(reg_df$gene1[reg_df$e.m == "0"], reg_df$gene2[reg_df$e.m == "0"])
+
+knitr::kable(
+  gene_key,
+  caption = "Genes Selected for Logistic Regression"
+)
+```
+
+The patients were divided approximately 80:20 between training and testing, keeping each patient's samples together to prevent leakage. The models learn from the training data and the held-out test data is used to assess their performance on unseen samples. This chunk also fits and compares one-gene and two-gene logistic regression models.
+
+```{r random_forest}
+# install.packages("randomForest") # Run once if needed
+library(randomForest)
+
+set.seed(123)
+
+Mt.forest <- randomForest(
+  e.m ~ gene1 + gene2,
+  data = train,
+  mtry = 1,
+  ntree = 500,
+  importance = TRUE
+)
+
+Mt.forest
+
+# Predict the held-out test samples
+forest_pred <- predict(Mt.forest, newdata = test, type = "class")
+forest_class <- as.numeric(as.character(forest_pred))
+
+assess.prediction(test$e.m, forest_class)
+
+# Examine gene importance
+importance(Mt.forest)
+varImpPlot(Mt.forest)
+```
+The random forest combines the predictions from many decision trees to classify Tumor vs. Normal using the selected genes. Its test results show how well it classified the held-out samples.
+```{r svm_model}
+library(e1071)
+
+M.svm <- svm(
+  e.m ~ gene1 + gene2,
+  data = train,
+  kernel = "linear",
+  cost = 1,
+  scale = TRUE
+)
+
+summary(M.svm)
+
+svm_pred <- stats::predict(M.svm, newdata = test)
+svm_class <- as.numeric(as.character(svm_pred))
+
+assess.prediction(test$e.m, svm_class)
+```
+The SVM uses selected genes to find a boundary separating Tumor from Normal. Test results measure classification performance on held-out samples.
+
+```{r neural_network}
+# install.packages("neuralnet") # Run once if needed
+library(neuralnet)
+
+predictor_cols <- c("gene1", "gene2")
+
+# Learn scaling from training samples
+scaled_train <- scale(train[, predictor_cols])
+
+scaled_test <- scale(
+  test[, predictor_cols],
+  center = attr(scaled_train, "scaled:center"),
+  scale = attr(scaled_train, "scaled:scale")
+)
+
+nn_train <- as.data.frame(scaled_train)
+nn_train$e.m <- as.numeric(as.character(train$e.m))
+
+set.seed(123)
+
+M.nn <- neuralnet(
+  e.m ~ gene1 + gene2,
+  data = nn_train,
+  hidden = 0,
+  linear.output = FALSE,
+  stepmax = 1e6
+)
+
+nn_probability <- compute(
+  M.nn,
+  as.data.frame(scaled_test)
+)$net.result[, 1]
+
+nn_class <- as.numeric(nn_probability > 0.5)
+
+assess.prediction(test$e.m, nn_class)
+
+M.nn$result.matrix
+plot(M.nn, rep = 1)
+```
+
+The neural network utilizes the selected genes and Tumor/Normal status and learns the relationship between them. The test results assess its predictions on held-out samples.
+
+
+```{r test_model_comparison}
+test_classes <- list(
+  "Logistic regression: one gene" = class1,
+  "Logistic regression: two genes" = class2,
+  "Random forest" = forest_class,
+  "Linear SVM" = svm_class,
+  "Neural network: hidden = 0" = nn_class
+)
+
+truth <- as.character(test$e.m)
+
+test_performance <- do.call(
+  rbind,
+  lapply(names(test_classes), function(model_name) {
+    predicted <- as.character(test_classes[[model_name]])
+
+    data.frame(
+      Model = model_name,
+      Correct = sum(predicted == truth),
+      Total = length(truth),
+      Accuracy = 100 * mean(predicted == truth),
+      Sensitivity = 100 * mean(predicted[truth == "1"] == "1"),
+      Specificity = 100 * mean(predicted[truth == "0"] == "0")
+    )
+  })
+)
+
+knitr::kable(
+  test_performance,
+  digits = 1,
+  caption = "Classification performance on 44 held-out test samples"
+)
+```
+
+Our test model comparison compares the models’ performance on the same held-out test samples. Scores that are higher indicate that performance is better on this test set. However, small differences do not establish a clear winner. One-gene logistic regression had the highest test accuracy, 95.5% (42/44), while several other models performed better in cross-validation.
+
+
+In patient-grouped cross validation we use five folds which keeps each patient's samples together and repeats feature selection within each training fold. This approach reduces leakage and assesses performance across multiple training/validation partitions.
+
+```{r q2_grouped_cv, message=FALSE}
+library(e1071)
+
+set.seed(123)
+
+# Use only the training patients
+cv_info <- model_info[train_idx, , drop = FALSE]
+cv_expression <- ge[, train_idx, drop = FALSE]
+cv_outcome <- outcome[train_idx]
+
+# Keep all samples from a patient in the same fold
+cv_patients <- unique(cv_info$patient)
+patient_folds <- sample(
+  rep(1:5, length.out = length(cv_patients))
+)
+
+sample_folds <- patient_folds[
+  match(cv_info$patient, cv_patients)
+]
+
+cv_predictions <- data.frame(
+  Truth = cv_outcome,
+  Logistic_One_Probability = NA_real_,
+  Logistic_Two_Probability = NA_real_,
+  NB_One_Probability = NA_real_,
+  NB_Two_Probability = NA_real_,
+  row.names = colnames(cv_expression)
+)
+
+for (fold in 1:5) {
+
+  fit_rows <- which(sample_folds != fold)
+  validation_rows <- which(sample_folds == fold)
+
+  # Select genes using this fold's training samples only
+  fold_pvals <- apply(
+    cv_expression[, fit_rows, drop = FALSE],
+    1,
+    function(values) {
+      t.test(values ~ cv_outcome[fit_rows])$p.value
+    }
+  )
+
+  fold_genes <- names(sort(fold_pvals))[1:2]
+
+  fold_data <- data.frame(
+    e.m = cv_outcome,
+    gene1 = cv_expression[fold_genes[1], ],
+    gene2 = cv_expression[fold_genes[2], ]
+  )
+
+  cv_train <- fold_data[fit_rows, , drop = FALSE]
+  cv_test <- fold_data[validation_rows, , drop = FALSE]
+
+  logistic_one <- glm(
+    e.m ~ gene1,
+    data = cv_train,
+    family = binomial
+  )
+
+  logistic_two <- glm(
+    e.m ~ gene1 + gene2,
+    data = cv_train,
+    family = binomial,
+    control = glm.control(maxit = 100)
+  )
+
+  cv_predictions$Logistic_One_Probability[validation_rows] <-
+    stats::predict(logistic_one, cv_test, type = "response")
+
+  cv_predictions$Logistic_Two_Probability[validation_rows] <-
+    stats::predict(logistic_two, cv_test, type = "response")
+
+  nb_one <- naiveBayes(e.m ~ gene1, data = cv_train)
+  nb_two <- naiveBayes(e.m ~ gene1 + gene2, data = cv_train)
+
+  cv_predictions$NB_One_Probability[validation_rows] <-
+    stats::predict(nb_one, cv_test, type = "raw")[, "1"]
+
+  cv_predictions$NB_Two_Probability[validation_rows] <-
+    stats::predict(nb_two, cv_test, type = "raw")[, "1"]
+}
+
+head(cv_predictions)
+
+probability_cols <- names(cv_predictions)[-1]
+
+for (model_name in probability_cols) {
+  cat("\n", model_name, "\n")
+
+  assess.prediction(
+    cv_predictions$Truth,
+    as.numeric(cv_predictions[[model_name]] > 0.5)
+  )
+}
+
+
+
+```
+## Random Forest Comparison
+
+Random Forest compares mtry = 1 and mtry = 2. These control the number of genes that are considered at each tree split using patient-grouped cross-validation.
+```{r random_forest_comparison, message=FALSE}
+library(randomForest)
+
+set.seed(123)
+
+rf_cv_predictions <- matrix(
+  NA_integer_,
+  nrow = length(cv_outcome),
+  ncol = 2,
+  dimnames = list(
+    names(cv_outcome),
+    c("mtry_1", "mtry_2")
+  )
+)
+
+for (fold in 1:5) {
+
+  fit_rows <- which(sample_folds != fold)
+  validation_rows <- which(sample_folds == fold)
+
+  # Select genes within this fold's training data
+  fold_pvals <- apply(
+    cv_expression[, fit_rows, drop = FALSE],
+    1,
+    function(values) {
+      t.test(values ~ cv_outcome[fit_rows])$p.value
+    }
+  )
+
+  fold_genes <- names(sort(fold_pvals))[1:2]
+
+  fold_data <- data.frame(
+    e.m = cv_outcome,
+    gene1 = cv_expression[fold_genes[1], ],
+    gene2 = cv_expression[fold_genes[2], ]
+  )
+
+  cv_train <- fold_data[fit_rows, , drop = FALSE]
+  cv_test <- fold_data[validation_rows, , drop = FALSE]
+
+  for (m in 1:2) {
+
+    forest <- randomForest(
+      e.m ~ gene1 + gene2,
+      data = cv_train,
+      mtry = m,
+      ntree = 500
+    )
+
+    predicted <- stats::predict(
+      forest,
+      newdata = cv_test,
+      type = "class"
+    )
+
+    rf_cv_predictions[validation_rows, m] <-
+      as.numeric(as.character(predicted))
+  }
+}
+
+for (m in 1:2) {
+  cat("\nRandom forest: mtry =", m, "\n")
+
+  assess.prediction(
+    cv_outcome,
+    rf_cv_predictions[, m]
+  )
+}
+```
+
+
+## SVM Comparison
+
+SVM compares a linear kernel with radial kernels by using different gamma settings to assess how these choices affect cross-validation performance.
+```{r svm_comparison, message=FALSE}
+library(e1071)
+
+svm_settings <- data.frame(
+  kernel = c("linear", "radial", "radial"),
+  cost = c(1, 1, 1),
+  gamma = c(0.5, 0.1, 1)
+)
+
+svm_cv_predictions <- matrix(
+  NA_integer_,
+  nrow = length(cv_outcome),
+  ncol = nrow(svm_settings)
+)
+
+for (fold in 1:5) {
+
+  fit_rows <- which(sample_folds != fold)
+  validation_rows <- which(sample_folds == fold)
+
+  # Select genes using this fold's training samples
+  fold_pvals <- apply(
+    cv_expression[, fit_rows, drop = FALSE],
+    1,
+    function(values) {
+      t.test(values ~ cv_outcome[fit_rows])$p.value
+    }
+  )
+
+  fold_genes <- names(sort(fold_pvals))[1:2]
+
+  fold_data <- data.frame(
+    e.m = cv_outcome,
+    gene1 = cv_expression[fold_genes[1], ],
+    gene2 = cv_expression[fold_genes[2], ]
+  )
+
+  cv_train <- fold_data[fit_rows, , drop = FALSE]
+  cv_test <- fold_data[validation_rows, , drop = FALSE]
+
+  for (j in seq_len(nrow(svm_settings))) {
+
+    model <- svm(
+      e.m ~ gene1 + gene2,
+      data = cv_train,
+      kernel = svm_settings$kernel[j],
+      cost = svm_settings$cost[j],
+      gamma = svm_settings$gamma[j],
+      scale = TRUE
+    )
+
+    predicted <- stats::predict(model, newdata = cv_test)
+
+    svm_cv_predictions[validation_rows, j] <-
+      as.numeric(as.character(predicted))
+  }
+}
+
+for (j in seq_len(nrow(svm_settings))) {
+  cat(
+    "\nSVM:", svm_settings$kernel[j],
+    "| cost =", svm_settings$cost[j],
+    "| gamma =", svm_settings$gamma[j], "\n"
+  )
+
+  assess.prediction(
+    cv_outcome,
+    svm_cv_predictions[, j]
+  )
+}
+```
+
+ 
+## Neural Network Comparison
+
+This compares networks with zero vs five hidden units using patient grouped cross-validation.
+
+```{r neural_network_comparison, message=FALSE}
+library(neuralnet)
+
+set.seed(123)
+
+hidden_settings <- c(0, 5)
+
+nn_cv_predictions <- matrix(
+  NA_integer_,
+  nrow = length(cv_outcome),
+  ncol = length(hidden_settings)
+)
+
+for (fold in 1:5) {
+
+  fit_rows <- which(sample_folds != fold)
+  validation_rows <- which(sample_folds == fold)
+
+  # Select genes using this fold's training samples
+  fold_pvals <- apply(
+    cv_expression[, fit_rows, drop = FALSE],
+    1,
+    function(values) {
+      t.test(values ~ cv_outcome[fit_rows])$p.value
+    }
+  )
+
+  fold_genes <- names(sort(fold_pvals))[1:2]
+
+  predictors <- data.frame(
+    gene1 = cv_expression[fold_genes[1], ],
+    gene2 = cv_expression[fold_genes[2], ]
+  )
+
+  # Learn scaling within this fold
+  scaled_fit <- scale(predictors[fit_rows, , drop = FALSE])
+
+  scaled_validation <- scale(
+    predictors[validation_rows, , drop = FALSE],
+    center = attr(scaled_fit, "scaled:center"),
+    scale = attr(scaled_fit, "scaled:scale")
+  )
+
+  fold_train <- as.data.frame(scaled_fit)
+  fold_train$e.m <- as.numeric(
+    as.character(cv_outcome[fit_rows])
+  )
+
+  for (j in seq_along(hidden_settings)) {
+
+    network <- neuralnet(
+      e.m ~ gene1 + gene2,
+      data = fold_train,
+      hidden = hidden_settings[j],
+      linear.output = FALSE,
+      stepmax = 1e6
+    )
+
+    if (is.null(network$result.matrix)) {
+      stop(
+        "Network did not converge: fold ", fold,
+        ", hidden = ", hidden_settings[j]
+      )
+    }
+
+    probability <- neuralnet::compute(
+      network,
+      as.data.frame(scaled_validation)
+    )$net.result[, 1]
+
+    nn_cv_predictions[validation_rows, j] <-
+      as.numeric(probability > 0.5)
+  }
+}
+
+for (j in seq_along(hidden_settings)) {
+  cat(
+    "\nNeural network: hidden =",
+    hidden_settings[j], "\n"
+  )
+
+  assess.prediction(
+    cv_outcome,
+    nn_cv_predictions[, j]
+  )
+}
+```
+
+
+## Cross-validated performance
+
+This summarizes cross-validation metrics for the logistic regression and Bayes models using predictions from held-out folds.
+
+```{r q2_cross_validated_performance}
+# Convert probabilities to predicted classes using 0.50 as the threshold
+cv_predictions$Logistic_One_Class <- factor(
+  ifelse(
+    cv_predictions$Logistic_One_Probability > 0.5,
+    "1",
+    "0"
+  ),
+  levels = c("0", "1")
+)
+
+cv_predictions$Logistic_Two_Class <- factor(
+  ifelse(
+    cv_predictions$Logistic_Two_Probability > 0.5,
+    "1",
+    "0"
+  ),
+  levels = c("0", "1")
+)
+
+cv_predictions$NB_One_Class <- factor(
+  ifelse(
+    cv_predictions$NB_One_Probability > 0.5,
+    "1",
+    "0"
+  ),
+  levels = c("0", "1")
+)
+
+cv_predictions$NB_Two_Class <- factor(
+  ifelse(
+    cv_predictions$NB_Two_Probability > 0.5,
+    "1",
+    "0"
+  ),
+  levels = c("0", "1")
+)
+
+# Function for calculating performance from pooled held-out predictions
+calculate_cv_metrics <- function(
+    truth,
+    predicted,
+    probability
+) {
+  truth <- factor(
+    truth,
+    levels = c("0", "1")
+  )
+
+  predicted <- factor(
+    predicted,
+    levels = c("0", "1")
+  )
+
+  TP <- sum(truth == "1" & predicted == "1")
+  TN <- sum(truth == "0" & predicted == "0")
+  FP <- sum(truth == "0" & predicted == "1")
+  FN <- sum(truth == "1" & predicted == "0")
+
+  accuracy <- (TP + TN) / length(truth)
+  sensitivity <- TP / (TP + FN)
+  specificity <- TN / (TN + FP)
+  precision <- TP / (TP + FP)
+  false_discovery_rate <- FP / (TP + FP)
+  false_positive_rate <- FP / (FP + TN)
+
+  f1_score <- (
+    2 * precision * sensitivity /
+      (precision + sensitivity)
+  )
+
+  # Rank-based calculation of ROC AUC
+  n_positive <- sum(truth == "1")
+  n_negative <- sum(truth == "0")
+
+  probability_ranks <- rank(
+    probability,
+    ties.method = "average"
+  )
+
+  roc_auc <- (
+    sum(probability_ranks[truth == "1"]) -
+      n_positive * (n_positive + 1) / 2
+  ) / (
+    n_positive * n_negative
+  )
+
+  data.frame(
+    Accuracy = 100 * accuracy,
+    Sensitivity = 100 * sensitivity,
+    Specificity = 100 * specificity,
+    Precision = 100 * precision,
+    F1 = 100 * f1_score,
+    FDR = 100 * false_discovery_rate,
+    FPR = 100 * false_positive_rate,
+    ROC_AUC = roc_auc
+  )
+}
+
+performance_table <- rbind(
+  cbind(
+    Model = "Logistic regression: one gene",
+    calculate_cv_metrics(
+      cv_predictions$Truth,
+      cv_predictions$Logistic_One_Class,
+      cv_predictions$Logistic_One_Probability
+    )
+  ),
+  cbind(
+    Model = "Logistic regression: two genes",
+    calculate_cv_metrics(
+      cv_predictions$Truth,
+      cv_predictions$Logistic_Two_Class,
+      cv_predictions$Logistic_Two_Probability
+    )
+  ),
+  cbind(
+    Model = "Naive Bayes: one gene",
+    calculate_cv_metrics(
+      cv_predictions$Truth,
+      cv_predictions$NB_One_Class,
+      cv_predictions$NB_One_Probability
+    )
+  ),
+  cbind(
+    Model = "Naive Bayes: two genes",
+    calculate_cv_metrics(
+      cv_predictions$Truth,
+      cv_predictions$NB_Two_Class,
+      cv_predictions$NB_Two_Probability
+    )
+  )
+)
+
+knitr::kable(
+  performance_table,
+  digits = 3,
+  caption = paste(
+    "Patient-Grouped Cross-Validation Performance",
+    "for Four Classification Models"
+  )
+)
+```
+
+## All CV models
+
+This compares all of the models' cross-validation accuracy, sensitivity, and specificity. The small performance differences we see do not establish a clear winner.
+```{r all_cv_models}
+cv_classes <- list(
+  "Logistic: one gene" =
+    as.numeric(cv_predictions$Logistic_One_Probability > 0.5),
+  "Logistic: two genes" =
+    as.numeric(cv_predictions$Logistic_Two_Probability > 0.5),
+  "Naive Bayes: one gene" =
+    as.numeric(cv_predictions$NB_One_Probability > 0.5),
+  "Naive Bayes: two genes" =
+    as.numeric(cv_predictions$NB_Two_Probability > 0.5),
+  "Random forest: mtry = 1" = rf_cv_predictions[, 1],
+  "Random forest: mtry = 2" = rf_cv_predictions[, 2],
+  "SVM: linear, cost = 1" = svm_cv_predictions[, 1],
+  "SVM: radial, gamma = 0.1" = svm_cv_predictions[, 2],
+  "SVM: radial, gamma = 1" = svm_cv_predictions[, 3],
+  "Neural network: hidden = 0" = nn_cv_predictions[, 1],
+  "Neural network: hidden = 5" = nn_cv_predictions[, 2]
+)
+
+truth <- as.character(cv_outcome)
+
+all_cv_performance <- do.call(
+  rbind,
+  lapply(names(cv_classes), function(model_name) {
+    predicted <- as.character(cv_classes[[model_name]])
+
+    stopifnot(
+      length(predicted) == length(truth),
+      !anyNA(predicted),
+      !anyNA(truth)
+    )
+
+    data.frame(
+      Model = model_name,
+      Correct = sum(predicted == truth),
+      Total = length(truth),
+      Accuracy = 100 * mean(predicted == truth),
+      Sensitivity = 100 * mean(predicted[truth == "1"] == "1"),
+      Specificity = 100 * mean(predicted[truth == "0"] == "0")
+    )
+  })
+)
+
+knitr::kable(
+  all_cv_performance,
+  digits = 1,
+  caption = "Patient-grouped five-fold cross-validation: all models"
+)
+``` 
+## CV Comparison Chart
+
+This visualizes cross-validation accuracy across models. The scores range from around 90.7% to 94.5%, with several models tied at the top.
+
+```{r cv_comparison_chart, fig.width=11, fig.height=7}
+chart_data <- all_cv_performance[
+  order(all_cv_performance$Accuracy),
+]
+
+old_par <- par(mar = c(5, 17, 4, 2))
+
+positions <- barplot(
+  chart_data$Accuracy,
+  names.arg = chart_data$Model,
+  horiz = TRUE,
+  las = 1,
+  col = "steelblue",
+  border = NA,
+  xlim = c(0, 110),
+  axes = FALSE,
+  cex.names = 0.8,
+  xlab = "Cross-validation accuracy (%)",
+  main = "Patient-Grouped Five-Fold Cross-Validation"
+)
+
+axis(1, at = seq(0, 100, 20))
+
+text(
+  x = chart_data$Accuracy,
+  y = positions,
+  labels = sprintf("%.1f%%", chart_data$Accuracy),
+  pos = 4,
+  cex = 0.8
+)
+
+par(old_par)
+``` 
+
+## Extra Credit: Basal versus Luminal Tumor Classification
+
+This extends the classification to Basal versus Luminal breast tumors using 
+PAM50 labels, exploring differences within tumors.
+
+```{r extra_credit_subtype}
+# Select eligible tumors and retain one sample per patient
+ec_info <- sample_info[
+  sample_info$Group == "Tumor" &
+    sample_info$paper_BRCA_Subtype_PAM50 %in%
+      c("Basal", "LumA", "LumB"),
+  ,
+  drop = FALSE
+]
+
+ec_info <- ec_info[
+  !duplicated(ec_info$patient),
+  ,
+  drop = FALSE
+]
+
+ec_info$Subtype_Group <- factor(
+  ifelse(
+    ec_info$paper_BRCA_Subtype_PAM50 == "Basal",
+    "Basal",
+    "Luminal"
+  ),
+  levels = c("Luminal", "Basal")
+)
+
+# Create five folds, preserving representation of both subtypes
+set.seed(123)
+ec_info$Fold <- NA_integer_
+
+for (group in levels(ec_info$Subtype_Group)) {
+  rows <- which(ec_info$Subtype_Group == group)
+  ec_info$Fold[rows] <- sample(
+    rep(1:5, length.out = length(rows))
+  )
+}
+
+table(ec_info$Subtype_Group)
+table(Fold = ec_info$Fold, Subtype = ec_info$Subtype_Group)
+
+ec_ge <- ge[, rownames(ec_info), drop = FALSE]
+
+ec_outcome <- factor(
+  as.numeric(ec_info$Subtype_Group == "Basal"),
+  levels = c(0, 1)
+)
+
+ec_probability_br <- rep(NA_real_, nrow(ec_info))
+ec_converged <- logical(5)
+ec_selected_genes <- vector("list", 5)
+
+for (fold in 1:5) {
+  fit_rows <- which(ec_info$Fold != fold)
+  validation_rows <- which(ec_info$Fold == fold)
+
+  # Select genes using only this fold's training patients
+  fold_pvals <- apply(
+    ec_ge[, fit_rows, drop = FALSE],
+    1,
+    function(values) {
+      tryCatch(
+        t.test(values ~ ec_outcome[fit_rows])$p.value,
+        error = function(e) NA_real_
+      )
+    }
+  )
+
+  ranked_genes <- names(sort(fold_pvals))
+  stopifnot(length(ranked_genes) >= 2)
+
+  selected <- ranked_genes[1:2]
+  ec_selected_genes[[fold]] <- selected
+
+  fold_data <- data.frame(
+    Subtype = ec_outcome,
+    gene1 = as.numeric(ec_ge[selected[1], ]),
+    gene2 = as.numeric(ec_ge[selected[2], ])
+  )
+
+  # Learn scaling from training patients only
+  predictors <- c("gene1", "gene2")
+
+  scaled_fit <- scale(
+    fold_data[fit_rows, predictors, drop = FALSE]
+  )
+
+  fold_data[, predictors] <- scale(
+    fold_data[, predictors, drop = FALSE],
+    center = attr(scaled_fit, "scaled:center"),
+    scale = attr(scaled_fit, "scaled:scale")
+  )
+
+  model_br <- glm(
+    Subtype ~ gene1 + gene2,
+    data = fold_data[fit_rows, , drop = FALSE],
+    family = binomial(),
+    method = brglm2::brglmFit,
+    control = brglm2::brglmControl(
+      type = "AS_mean",
+      maxit = 1000
+    )
+  )
+
+  ec_converged[fold] <- isTRUE(model_br$converged)
+
+  if (!ec_converged[fold]) {
+    stop("Model did not converge in fold ", fold)
+  }
+
+  ec_probability_br[validation_rows] <- predict(
+    model_br,
+    newdata = fold_data[validation_rows, , drop = FALSE],
+    type = "response"
+  )
+}
+
+stopifnot(all(ec_converged), !anyNA(ec_probability_br))
+
+ec_predicted_br <- factor(
+  as.numeric(ec_probability_br > 0.5),
+  levels = c(0, 1)
+)
+
+ec_confusion <- table(
+  Actual = ec_info$Subtype_Group,
+  Predicted = factor(
+    ec_predicted_br,
+    levels = c("0", "1"),
+    labels = c("Luminal", "Basal")
+  )
+)
+
+knitr::kable(
+  ec_confusion,
+  caption = "Subtype classification: cross-validated predictions"
+)
+
+ec_metrics <- calculate_cv_metrics(
+  truth = ec_outcome,
+  predicted = ec_predicted_br,
+  probability = ec_probability_br
+)
+
+knitr::kable(
+  ec_metrics,
+  digits = 3,
+  caption = "Subtype classification performance; Basal is positive"
+)
+
+# Display genes selected in each fold
+ec_gene_table <- data.frame(
+  Fold = rep(1:5, each = 2),
+  Gene_ID = unlist(ec_selected_genes, use.names = FALSE)
+)
+
+ec_gene_table$Symbol <- gene_info$gene_name[
+  match(
+    sub("\\..*$", "", ec_gene_table$Gene_ID),
+    sub("\\..*$", "", gene_info$gene_id)
+  )
+]
+
+knitr::kable(
+  ec_gene_table,
+  caption = "Genes selected using each fold's training patients"
+)
+
+data.frame(
+  Fold = 1:5,
+  Converged = ec_converged
+)
+```
+There was 92.9% accuracy, however, only 64.7% Basal sensitivity versus 98.8% Luminal specificity. This model missed 6 of 17 Basal tumors.

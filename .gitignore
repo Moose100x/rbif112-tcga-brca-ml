@@ -1,0 +1,6 @@
+*.rds
+*.fasta
+*.html
+.Rhistory
+.DS_Store
+HW5_figures/
